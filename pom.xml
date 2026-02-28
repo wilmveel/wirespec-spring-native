@@ -28,7 +28,7 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
-		<wirespec.version>0.0.0-SNAPSHOT</wirespec.version>
+		<wirespec.version>0.17.20</wirespec.version>
 	</properties>
 	<dependencyManagement>
 		<dependencies>

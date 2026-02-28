@@ -15,6 +15,12 @@ public class TodoService {
 	private final List<Todo> todos = new ArrayList<>();
 	private final AtomicLong idCounter = new AtomicLong(1);
 
+	public TodoService() {
+		todos.add(new Todo(idCounter.getAndIncrement(), "Buy groceries", false));
+		todos.add(new Todo(idCounter.getAndIncrement(), "Walk the dog", true));
+		todos.add(new Todo(idCounter.getAndIncrement(), "Finish project report", false));
+	}
+
 	public List<Todo> findAll() {
 		return List.copyOf(todos);
 	}
