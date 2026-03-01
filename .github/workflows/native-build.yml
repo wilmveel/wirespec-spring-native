@@ -1,4 +1,4 @@
-name: Native Build
+name: Build Pipeline
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
-    name: Run Tests
+  java-build:
+    name: Java Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,12 +27,11 @@ jobs:
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
 
-      - name: Run tests
+      - name: Build and test
         run: ./mvnw verify -B
 
   native-build:
     name: Native Image Build & Test
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +49,16 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
+
+      - name: Cache GraalVM native image build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/graalvm
+            target/graalvm-reachability-metadata
+            target/native
+          key: ${{ runner.os }}-graalvm-native-${{ hashFiles('**/pom.xml', 'src/**') }}
+          restore-keys: ${{ runner.os }}-graalvm-native-
 
       - name: Run native tests
         run: ./mvnw -PnativeTest test -B
