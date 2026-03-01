@@ -31,7 +31,7 @@ jobs:
         run: ./mvnw verify -B
 
   native-build:
-    name: Native Image Build
+    name: Native Image Build & Test
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +50,9 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-maven-
+
+      - name: Run native tests
+        run: ./mvnw -PnativeTest test -B
 
       - name: Build native image
         run: ./mvnw -Pnative native:compile -B -DskipTests
