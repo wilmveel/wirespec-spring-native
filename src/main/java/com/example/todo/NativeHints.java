@@ -1,5 +1,11 @@
 package com.example.todo;
 
+import com.example.todo.flatbuffers.*;
+import com.example.todo.flatbuffers.codec.*;
+import com.example.todo.generated.endpoint.*;
+import com.example.todo.generated.model.Error;
+import com.example.todo.generated.model.Todo;
+import com.example.todo.generated.model.TodoInput;
 import community.flock.wirespec.integration.spring.shared.RawJsonBody;
 import community.flock.wirespec.java.Wirespec;
 import org.springframework.aot.hint.MemberCategory;
@@ -7,16 +13,10 @@ import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportRuntimeHints;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-
-import java.io.IOException;
 
 @Configuration
 @ImportRuntimeHints(NativeHints.WirespecHints.class)
 public class NativeHints {
-
-	private static final String GENERATED_PACKAGE = "com/example/todo/generated";
 
 	static class WirespecHints implements RuntimeHintsRegistrar {
 		@Override
@@ -31,21 +31,33 @@ public class NativeHints {
 			// Kotlin module metadata (needed for Kotlin reflection in native image)
 			hints.resources().registerPattern("META-INF/*.kotlin_module");
 
-			// Auto-discover all generated wirespec classes
-			var resolver = new PathMatchingResourcePatternResolver(classLoader);
-			try {
-				Resource[] resources = resolver.getResources("classpath*:" + GENERATED_PACKAGE + "/**/*.class");
-				for (Resource resource : resources) {
-					String path = resource.getURL().getPath();
-					int idx = path.indexOf(GENERATED_PACKAGE);
-					if (idx == -1) continue;
-					String className = path.substring(idx, path.length() - ".class".length())
-							.replace('/', '.');
-					Class<?> clazz = Class.forName(className, false, classLoader);
-					hints.reflection().registerType(clazz, allMembers);
-				}
-			} catch (IOException | ClassNotFoundException e) {
-				throw new RuntimeException("Failed to discover wirespec generated classes", e);
+			// Generated wirespec model classes
+			registerWithInnerClasses(hints, Todo.class, allMembers);
+			registerWithInnerClasses(hints, TodoInput.class, allMembers);
+			registerWithInnerClasses(hints, Error.class, allMembers);
+
+			// FlatBuffers integration classes
+			hints.reflection().registerType(RawFlatBuffersBody.class, allMembers);
+			hints.reflection().registerType(FlatBuffersSerialization.class, allMembers);
+			hints.reflection().registerType(ContentNegotiatingWirespecSerialization.class, allMembers);
+			hints.reflection().registerType(FlatBuffersResponseBodyAdvice.class, allMembers);
+			hints.reflection().registerType(FlatBuffersHttpMessageConverter.class, allMembers);
+			hints.reflection().registerType(TodoFlatBuffersCodec.class, allMembers);
+			hints.reflection().registerType(TodoInputFlatBuffersCodec.class, allMembers);
+			hints.reflection().registerType(ErrorFlatBuffersCodec.class, allMembers);
+
+			// Generated wirespec endpoint classes
+			registerWithInnerClasses(hints, GetTodos.class, allMembers);
+			registerWithInnerClasses(hints, GetTodoById.class, allMembers);
+			registerWithInnerClasses(hints, CreateTodo.class, allMembers);
+			registerWithInnerClasses(hints, UpdateTodo.class, allMembers);
+			registerWithInnerClasses(hints, DeleteTodo.class, allMembers);
+		}
+
+		private static void registerWithInnerClasses(RuntimeHints hints, Class<?> clazz, MemberCategory[] categories) {
+			hints.reflection().registerType(clazz, categories);
+			for (Class<?> inner : clazz.getDeclaredClasses()) {
+				registerWithInnerClasses(hints, inner, categories);
 			}
 		}
 	}
