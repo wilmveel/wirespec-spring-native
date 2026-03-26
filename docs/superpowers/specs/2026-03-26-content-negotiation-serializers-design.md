@@ -6,80 +6,116 @@ Add content negotiation to the Wirespec serialization layer, switching between J
 
 ## Architecture
 
+### Content Type Propagation via ThreadLocal
+
+Wirespec's `Serializer`/`Deserializer` interfaces (`serializeBody(T, Type)` / `deserializeBody(byte[], Type)`) do not receive HTTP headers. To make the content type available:
+
+1. **`ContentTypeContext`** — A generated utility class with a `ThreadLocal<String>` holding the current request's content type (for deserialization) and accepted response type (for serialization).
+   - `static void setRequestContentType(String contentType)`
+   - `static String getRequestContentType()`
+   - `static void setAcceptContentType(String accept)`
+   - `static String getAcceptContentType()`
+   - `static void clear()`
+
+2. **`ContentTypeFilter`** — A Spring `OncePerRequestFilter` (generated or hand-written in app) that:
+   - Reads `Content-Type` header → sets `ContentTypeContext.setRequestContentType()`
+   - Reads `Accept` header → sets `ContentTypeContext.setAcceptContentType()`
+   - Calls `filterChain.doFilter()`
+   - Clears the ThreadLocal in a `finally` block
+
 ### Generated Artifacts (per Wirespec type)
 
 The existing emitter already generates: Interface, Record, FlatBuffer class, WirespecJacksonModule. The following are added:
 
-1. **`*ListFlatBuffer` wrapper classes** — Root table with a vector field for list serialization. E.g., `TodoListFlatBuffer` with `items(int index): Todo`, `itemsLength(): int`, and a static `createTodoListFlatBuffer(builder, vectorOffset)` builder. Generated in `com.example.todo.generated.flatbuffers`.
+1. **`*ListFlatBuffer` wrapper classes** — Generated only for types that appear as `T[]` in endpoint responses (e.g., `TodoListFlatBuffer` for `Todo[]` in `GetTodos`). Root table with a vector field: `items(int index): Todo`, `itemsLength(): int`, and a static `createTodoListFlatBuffer(builder, vectorOffset)` builder. Generated in `com.example.todo.generated.flatbuffers`.
 
 2. **`FlatBufferSerializer`** — Generated class in `com.example.todo.generated.flatbuffers` that serializes/deserializes every generated type to/from `byte[]`. One method pair per type:
    - `serializeTodo(Todo): byte[]` / `deserializeTodo(byte[]): Todo`
    - `serializeTodoList(List<Todo>): byte[]` / `deserializeTodoList(byte[]): List<Todo>`
    - Same pattern for `TodoInput`, `Error`, etc.
+   - **Deserialization** always copies FlatBuffer fields into a Record instance (e.g., `TodoRecord`) — FlatBuffer objects are `ByteBuffer`-backed and not safe to retain.
+   - **Serialization** converts domain objects field-by-field into FlatBuffer builder calls. String fields require `builder.createString()` offset allocation before the table is started.
 
-3. **`ContentTypeSerializer`** — Generated composite serializer implementing Wirespec's `Serializer<T>` and `Deserializer` interfaces. Located in `com.example.todo.generated.model`. Switches on content type:
+3. **`ContentTypeSerializer`** — Generated composite serializer implementing Wirespec's `Serializer<T>` and `Deserializer` interfaces. Located in `com.example.todo.generated.model`. Reads content type from `ContentTypeContext` ThreadLocal:
    - `application/json` → delegates to Jackson
    - `application/flatbuffers` → delegates to `FlatBufferSerializer`
    - Default (missing/unknown content type) → falls back to JSON
 
+### Type Dispatch in ContentTypeSerializer
+
+The generic `serializeBody(T body, Type type)` method must dispatch to the correct type-specific FlatBuffer method. The generated code uses:
+- Direct class comparison for simple types: `if (type == Todo.class) return flatBufferSerializer.serializeTodo((Todo) body)`
+- For `List<T>` types: check `rawType == List.class`, then inspect `ParameterizedType.getActualTypeArguments()[0]` to determine the element type and dispatch to the correct list method (e.g., `serializeTodoList`)
+
+### Special Cases
+
+- **`Unit` / 204 responses** (e.g., `DeleteTodo`): Skip FlatBuffer encoding entirely. The `ContentTypeSerializer` returns an empty `byte[]` when the body is `Unit` or `Void`, regardless of content type.
+- **Error responses** (e.g., 404): Serialize the `Error` type as a FlatBuffer when `Accept: application/flatbuffers`. The `ErrorFlatBuffer` class handles this.
+
 ### Content Negotiation Flow
 
 **Request path (deserialization):**
-1. HTTP request arrives with `Content-Type` header
-2. Wirespec's `fromRequest()` pipeline invokes `ContentTypeSerializer.deserialize()`
-3. Serializer reads the content type from the request
-4. `application/flatbuffers` → parse bytes via `FlatBufferSerializer`
+1. HTTP request arrives → `ContentTypeFilter` sets ThreadLocal from `Content-Type` header
+2. Wirespec's `fromRequest()` pipeline invokes `ContentTypeSerializer.deserializeBody()`
+3. Serializer reads content type from `ContentTypeContext.getRequestContentType()`
+4. `application/flatbuffers` → parse bytes via `FlatBufferSerializer`, copy into Record
 5. `application/json` or default → parse via Jackson
 
 **Response path (serialization):**
 1. Controller handler returns a domain object (e.g., `TodoRecord`)
-2. Wirespec's `toResponse()` pipeline invokes `ContentTypeSerializer.serialize()`
-3. Serializer checks the incoming request's `Accept` header (or falls back to `Content-Type`)
+2. Wirespec's `toResponse()` pipeline invokes `ContentTypeSerializer.serializeBody()`
+3. Serializer reads accept type from `ContentTypeContext.getAcceptContentType()`
 4. `application/flatbuffers` → serialize via `FlatBufferSerializer`
 5. `application/json` or default → serialize via Jackson
-6. Sets the response `Content-Type` header accordingly
+6. `ContentTypeFilter` clears ThreadLocal in `finally` block
 
 ### Key Design Decisions
 
 - **Content negotiation at Wirespec Serializer/Deserializer level** (not Spring HttpMessageConverter or controller-level)
+- **ThreadLocal for content type propagation** — bridges the gap between HTTP headers and Wirespec's header-unaware serializer interface
 - **Media type:** `application/flatbuffers`
-- **List responses:** Vector in a root table with generic `items` field name
+- **List responses:** Vector in a root table with generic `items` field name; generated only for types appearing as arrays in endpoints
 - **All serialization code generated by the emitter** — stays in sync with schema automatically
 - **Single composite serializer** — one class checks content type and delegates internally
+- **Deserialization always copies into Records** — FlatBuffer objects are ByteBuffer-backed and unsafe to retain
 
 ## Components Modified
 
 ### Emitter (`emitter/src/main/kotlin/.../InterfaceRecordEmitter.kt`)
 
 Add generation methods for:
-- `*ListFlatBuffer` wrapper classes (one per Wirespec type)
-- `FlatBufferSerializer` class with per-type serialize/deserialize methods
-- `ContentTypeSerializer` composite class
+- `ContentTypeContext` utility class (ThreadLocal holder)
+- `*ListFlatBuffer` wrapper classes (only for types used as arrays in endpoints)
+- `FlatBufferSerializer` class with per-type serialize/deserialize methods (including Record copy on deserialize)
+- `ContentTypeSerializer` composite class with type dispatch logic
 
-### App (minimal changes)
+### App
 
-- Wire `ContentTypeSerializer` as a Spring bean (or ensure the generated class is annotated `@Component`)
-- Register any new generated classes in `NativeHints.java` for GraalVM (may already be handled by the auto-discovery logic)
+- Add `ContentTypeFilter` (Spring `OncePerRequestFilter`) that sets/clears `ContentTypeContext`
+- GraalVM native hints: auto-discovery in `NativeHints.java` already scans `com/example/todo/generated/**/*.class`, so new generated classes are covered. Validate during implementation that FlatBuffers library classes and `ByteBuffer` usage work in native image.
 
 ## Test Plan
 
 ### Unit Tests: FlatBufferSerializer
 
-- Round-trip `TodoRecord` → bytes → deserialize, assert field equality
-- Round-trip `TodoInputRecord` → bytes → deserialize
-- Round-trip `List<Todo>` → bytes via wrapper → deserialize, verify list contents and ordering
+- Round-trip `TodoRecord` → bytes → deserialize back to `TodoRecord`, assert field equality
+- Round-trip `TodoInputRecord` → bytes → deserialize back to `TodoInputRecord`
+- Round-trip `List<Todo>` → bytes via `TodoListFlatBuffer` wrapper → deserialize, verify list contents and ordering
+- Verify deserialized objects are Record instances (not FlatBuffer-backed)
 
 ### Unit Tests: ContentTypeSerializer
 
-- With `application/json` content type → produces valid JSON string
-- With `application/flatbuffers` content type → produces valid FlatBuffer bytes
+- With `application/json` content type in ThreadLocal → produces valid JSON string
+- With `application/flatbuffers` content type in ThreadLocal → produces valid FlatBuffer bytes
 - Default/missing content type → falls back to JSON
+- `Unit` body → returns empty bytes regardless of content type
 
 ### Integration Tests (WebTestClient)
 
 - `POST /api/todos` with `Content-Type: application/flatbuffers` → todo created correctly
-- `GET /api/todos` with `Accept: application/flatbuffers` → response is valid FlatBuffer, deserialize and assert
+- `GET /api/todos` with `Accept: application/flatbuffers` → response is valid FlatBuffer, deserialize and assert list
 - `GET /api/todos/{id}` with `Accept: application/json` → existing JSON behavior preserved
 - `PUT /api/todos/{id}` with FlatBuffers request and response
 - Mixed: `POST` with JSON `Content-Type`, `Accept: application/flatbuffers` → cross-format works
 - Error: `GET /api/todos/99999` with `Accept: application/flatbuffers` → 404 error serialized as FlatBuffer
+- `DELETE /api/todos/{id}` with `Accept: application/flatbuffers` → 204 with empty body
