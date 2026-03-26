@@ -585,6 +585,150 @@ class InterfaceRecordEmitter(
         return Emitted("${flatbuffersPackage.toDir()}FlatBufferSerializer", content)
     }
 
+    private fun generateContentTypeSerializer(module: Module): Emitted {
+        val modelPackage = _packageName + "model"
+        val flatbuffersPackage = _packageName + "flatbuffers"
+        val arrayTypes = findArrayResponseTypes(module)
+
+        val content = buildString {
+            appendLine("package ${modelPackage.value};")
+            appendLine()
+            appendLine("import java.lang.reflect.Type;")
+            appendLine("import java.lang.reflect.ParameterizedType;")
+            appendLine("import java.util.List;")
+            appendLine("import com.fasterxml.jackson.databind.ObjectMapper;")
+            appendLine("import community.flock.wirespec.java.Wirespec;")
+            appendLine("import community.flock.wirespec.integration.jackson.java.WirespecSerialization;")
+            appendLine("import ${flatbuffersPackage.value}.FlatBufferSerializer;")
+
+            // Import model types
+            for ((typeName, _) in typeMappings) {
+                appendLine("import ${modelPackage.value}.$typeName;")
+            }
+
+            appendLine()
+            appendLine("public class ContentTypeSerializer implements Wirespec.Serialization {")
+            appendLine()
+            appendLine("  private final WirespecSerialization jacksonSerialization;")
+            appendLine()
+            appendLine("  public ContentTypeSerializer(ObjectMapper objectMapper) {")
+            appendLine("    this.jacksonSerialization = new WirespecSerialization(objectMapper);")
+            appendLine("  }")
+            appendLine()
+
+            // Helper method to get raw type
+            appendLine("  private static Class<?> getRawType(Type type) {")
+            appendLine("    if (type instanceof Class<?>) {")
+            appendLine("      return (Class<?>) type;")
+            appendLine("    } else if (type instanceof ParameterizedType) {")
+            appendLine("      return (Class<?>) ((ParameterizedType) type).getRawType();")
+            appendLine("    }")
+            appendLine("    return Object.class;")
+            appendLine("  }")
+            appendLine()
+
+            // serializeBody
+            appendLine("  @Override")
+            appendLine("  public <T> byte[] serializeBody(T body, Type type) {")
+            appendLine("    if (body == null) return new byte[0];")
+            appendLine("    String contentType = ContentTypeContext.getAcceptContentType();")
+            appendLine("    if (\"application/flatbuffers\".equals(contentType)) {")
+
+            // Handle ParameterizedType (List<T>) first
+            appendLine("      if (type instanceof ParameterizedType) {")
+            appendLine("        ParameterizedType pt = (ParameterizedType) type;")
+            appendLine("        Class<?> rawType = (Class<?>) pt.getRawType();")
+            appendLine("        if (rawType == List.class) {")
+            appendLine("          Type argType = pt.getActualTypeArguments()[0];")
+            appendLine("          Class<?> argClass = getRawType(argType);")
+
+            for ((typeName, _) in typeMappings) {
+                if (typeName in arrayTypes) {
+                    appendLine("          if ($typeName.class.isAssignableFrom(argClass)) {")
+                    appendLine("            @SuppressWarnings(\"unchecked\")")
+                    appendLine("            List<$typeName> list = (List<$typeName>) body;")
+                    appendLine("            return FlatBufferSerializer.serialize${typeName}List(list);")
+                    appendLine("          }")
+                }
+            }
+
+            appendLine("        }")
+            appendLine("      }")
+
+            // Handle simple types
+            appendLine("      Class<?> rawType = getRawType(type);")
+            for ((typeName, _) in typeMappings) {
+                appendLine("      if ($typeName.class.isAssignableFrom(rawType)) return FlatBufferSerializer.serialize$typeName(($typeName) body);")
+            }
+
+            appendLine("    }")
+            appendLine("    return jacksonSerialization.serializeBody(body, type);")
+            appendLine("  }")
+            appendLine()
+
+            // deserializeBody
+            appendLine("  @Override")
+            appendLine("  @SuppressWarnings(\"unchecked\")")
+            appendLine("  public <T> T deserializeBody(byte[] bytes, Type type) {")
+            appendLine("    if (bytes == null || bytes.length == 0) return null;")
+            appendLine("    String contentType = ContentTypeContext.getRequestContentType();")
+            appendLine("    if (\"application/flatbuffers\".equals(contentType)) {")
+
+            // Handle ParameterizedType (List<T>) first
+            appendLine("      if (type instanceof ParameterizedType) {")
+            appendLine("        ParameterizedType pt = (ParameterizedType) type;")
+            appendLine("        Class<?> rawType = (Class<?>) pt.getRawType();")
+            appendLine("        if (rawType == List.class) {")
+            appendLine("          Type argType = pt.getActualTypeArguments()[0];")
+            appendLine("          Class<?> argClass = getRawType(argType);")
+
+            for ((typeName, _) in typeMappings) {
+                if (typeName in arrayTypes) {
+                    appendLine("          if ($typeName.class.isAssignableFrom(argClass)) return (T) FlatBufferSerializer.deserialize${typeName}List(bytes);")
+                }
+            }
+
+            appendLine("        }")
+            appendLine("      }")
+
+            // Handle simple types
+            appendLine("      Class<?> rawType = getRawType(type);")
+            for ((typeName, _) in typeMappings) {
+                appendLine("      if ($typeName.class.isAssignableFrom(rawType)) return (T) FlatBufferSerializer.deserialize$typeName(bytes);")
+            }
+
+            appendLine("    }")
+            appendLine("    return jacksonSerialization.deserializeBody(bytes, type);")
+            appendLine("  }")
+            appendLine()
+
+            // Delegate path/param methods to Jackson
+            appendLine("  @Override")
+            appendLine("  public <T> String serializePath(T value, Type type) {")
+            appendLine("    return jacksonSerialization.serializePath(value, type);")
+            appendLine("  }")
+            appendLine()
+            appendLine("  @Override")
+            appendLine("  public <T> T deserializePath(String value, Type type) {")
+            appendLine("    return jacksonSerialization.deserializePath(value, type);")
+            appendLine("  }")
+            appendLine()
+            appendLine("  @Override")
+            appendLine("  public <T> java.util.List<String> serializeParam(T value, Type type) {")
+            appendLine("    return jacksonSerialization.serializeParam(value, type);")
+            appendLine("  }")
+            appendLine()
+            appendLine("  @Override")
+            appendLine("  public <T> T deserializeParam(java.util.List<String> values, Type type) {")
+            appendLine("    return jacksonSerialization.deserializeParam(values, type);")
+            appendLine("  }")
+
+            append("}")
+        }
+
+        return Emitted("${modelPackage.toDir()}ContentTypeSerializer", content)
+    }
+
     override fun emit(module: Module, logger: Logger): NonEmptyList<Emitted> {
         extraEmitted.clear()
         typeMappings.clear()
@@ -641,6 +785,9 @@ class InterfaceRecordEmitter(
 
         // Generate FlatBufferSerializer
         extraEmitted.add(generateFlatBufferSerializer(module))
+
+        // Generate ContentTypeSerializer
+        extraEmitted.add(generateContentTypeSerializer(module))
 
         val allExtra = extraEmitted.toList()
         extraEmitted.clear()
