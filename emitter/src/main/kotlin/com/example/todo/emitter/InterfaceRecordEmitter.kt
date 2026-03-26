@@ -10,6 +10,7 @@ import community.flock.wirespec.compiler.core.parse.ast.Identifier
 import community.flock.wirespec.compiler.core.parse.ast.Module
 import community.flock.wirespec.compiler.core.parse.ast.Reference
 import community.flock.wirespec.compiler.core.parse.ast.Type
+import community.flock.wirespec.compiler.core.parse.ast.Endpoint
 import community.flock.wirespec.compiler.utils.Logger
 import community.flock.wirespec.integration.spring.java.emit.SpringJavaEmitter
 
@@ -19,6 +20,7 @@ class InterfaceRecordEmitter(
 
     private val extraEmitted = mutableListOf<Emitted>()
     private val typeMappings = mutableListOf<Pair<String, String>>()
+    private val typeFields = mutableMapOf<String, List<Field>>()
 
     private fun emitRef(ref: Reference): String {
         val method = this.javaClass.getMethod("emit", Reference::class.java)
@@ -75,6 +77,7 @@ class InterfaceRecordEmitter(
 
         // Track mapping for Jackson module generation
         typeMappings.add(name to recordName)
+        typeFields[name] = fields
 
         // Return interface body
         return buildString {
@@ -325,9 +328,107 @@ class InterfaceRecordEmitter(
         return Emitted("${modelPackage.toDir()}ContentTypeContext", content)
     }
 
+    private fun findArrayResponseTypes(module: Module): Set<String> {
+        val arrayTypes = mutableSetOf<String>()
+        for (statement in module.statements) {
+            if (statement is Endpoint) {
+                for (response in statement.responses) {
+                    val ref = response.content?.reference
+                    if (ref is Reference.Iterable) {
+                        val inner = ref.reference
+                        if (inner is Reference.Custom) {
+                            arrayTypes.add(inner.value)
+                        }
+                    }
+                }
+            }
+        }
+        return arrayTypes
+    }
+
+    private fun generateListFlatBuffer(packageName: String, typeName: String): String {
+        val className = "${typeName}ListFlatBuffer"
+        val itemClassName = "${typeName}FlatBuffer"
+
+        return buildString {
+            appendLine("package $packageName;")
+            appendLine()
+            appendLine("import java.nio.ByteBuffer;")
+            appendLine("import java.nio.ByteOrder;")
+            appendLine("import com.google.flatbuffers.*;")
+            appendLine()
+            appendLine("public final class $className extends Table {")
+            appendLine()
+
+            // getRootAs factory
+            appendLine("  public static $className getRootAs$className(ByteBuffer bb) {")
+            appendLine("    bb.order(ByteOrder.LITTLE_ENDIAN);")
+            appendLine("    return (new $className()).__assign(bb.getInt(bb.position()) + bb.position(), bb);")
+            appendLine("  }")
+            appendLine()
+
+            // __assign
+            appendLine("  public $className __assign(int i, ByteBuffer bb) {")
+            appendLine("    __reset(i, bb);")
+            appendLine("    return this;")
+            appendLine("  }")
+            appendLine()
+
+            // items(int j) accessor - vtable offset 4 for the vector
+            appendLine("  public $itemClassName items(int j) {")
+            appendLine("    int o = __offset(4);")
+            appendLine("    return o != 0 ? (new $itemClassName()).__assign(__indirect(__vector(o) + j * 4), bb) : null;")
+            appendLine("  }")
+            appendLine()
+
+            // itemsLength()
+            appendLine("  public int itemsLength() {")
+            appendLine("    int o = __offset(4);")
+            appendLine("    return o != 0 ? __vector_len(o) : 0;")
+            appendLine("  }")
+            appendLine()
+
+            // createItemsVector
+            appendLine("  public static int createItemsVector(FlatBufferBuilder builder, int[] data) {")
+            appendLine("    builder.startVector(4, data.length, 4);")
+            appendLine("    for (int i = data.length - 1; i >= 0; i--) builder.addOffset(data[i]);")
+            appendLine("    return builder.endVector();")
+            appendLine("  }")
+            appendLine()
+
+            // create method
+            appendLine("  public static int create$className(FlatBufferBuilder builder, int itemsOffset) {")
+            appendLine("    builder.startTable(1);")
+            appendLine("    addItems(builder, itemsOffset);")
+            appendLine("    return end$className(builder);")
+            appendLine("  }")
+            appendLine()
+
+            // start method
+            appendLine("  public static void start$className(FlatBufferBuilder builder) {")
+            appendLine("    builder.startTable(1);")
+            appendLine("  }")
+            appendLine()
+
+            // addItems
+            appendLine("  public static void addItems(FlatBufferBuilder builder, int itemsOffset) {")
+            appendLine("    builder.addOffset(0, itemsOffset, 0);")
+            appendLine("  }")
+            appendLine()
+
+            // end method
+            appendLine("  public static int end$className(FlatBufferBuilder builder) {")
+            appendLine("    return builder.endTable();")
+            appendLine("  }")
+
+            append("}")
+        }
+    }
+
     override fun emit(module: Module, logger: Logger): NonEmptyList<Emitted> {
         extraEmitted.clear()
         typeMappings.clear()
+        typeFields.clear()
 
         val result = super.emit(module, logger)
 
@@ -368,9 +469,20 @@ class InterfaceRecordEmitter(
         // Generate ContentTypeContext utility class (once per module)
         extraEmitted.add(generateContentTypeContext())
 
+        // Generate ListFlatBuffer wrappers for array response types
+        val arrayTypes = findArrayResponseTypes(module)
+        val flatbuffersPackage = _packageName + "flatbuffers"
+        for (typeName in arrayTypes) {
+            val listFbContent = generateListFlatBuffer(flatbuffersPackage.value, typeName)
+            extraEmitted.add(
+                Emitted("${flatbuffersPackage.toDir()}${typeName}ListFlatBuffer", listFbContent)
+            )
+        }
+
         val allExtra = extraEmitted.toList()
         extraEmitted.clear()
         typeMappings.clear()
+        typeFields.clear()
 
         return if (allExtra.isEmpty()) {
             result
