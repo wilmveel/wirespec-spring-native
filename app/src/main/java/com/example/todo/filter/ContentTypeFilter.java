@@ -1,6 +1,5 @@
 package com.example.todo.filter;
 
-import com.example.todo.generated.model.ContentTypeContext;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -10,29 +9,17 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 
+/**
+ * Filter is kept for request-body reading (RawJsonBody) with application/flatbuffers content type.
+ * The content-type context setting has been moved to ContentTypeInterceptor to support
+ * async CompletableFuture response handling.
+ */
 @Component
 public class ContentTypeFilter extends OncePerRequestFilter {
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
-        try {
-            String contentType = request.getHeader("Content-Type");
-            if (contentType != null) {
-                ContentTypeContext.setRequestContentType(contentType);
-            }
-
-            String accept = request.getHeader("Accept");
-            if (accept != null) {
-                ContentTypeContext.setAcceptContentType(accept);
-                if ("application/flatbuffers".equals(accept)) {
-                    response.setContentType("application/flatbuffers");
-                }
-            }
-
-            filterChain.doFilter(request, response);
-        } finally {
-            ContentTypeContext.clear();
-        }
+        filterChain.doFilter(request, response);
     }
 }

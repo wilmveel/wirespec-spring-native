@@ -10,10 +10,9 @@ import org.springframework.http.converter.HttpMessageNotWritableException;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 
 @Component
-public class FlatBufferHttpMessageConverter extends AbstractHttpMessageConverter<RawJsonBody> {
+public class FlatBufferHttpMessageConverter extends AbstractHttpMessageConverter<Object> {
 
     public static final MediaType APPLICATION_FLATBUFFERS = MediaType.parseMediaType("application/flatbuffers");
 
@@ -23,23 +22,35 @@ public class FlatBufferHttpMessageConverter extends AbstractHttpMessageConverter
 
     @Override
     protected boolean supports(Class<?> clazz) {
-        return RawJsonBody.class.isAssignableFrom(clazz);
+        // Support any class when the Accept content type is application/flatbuffers.
+        // The WirespecResponseBodyAdvice will convert Wirespec Response objects
+        // to RawJsonBody before writeInternal is called.
+        return "application/flatbuffers".equals(
+                com.example.todo.generated.model.ContentTypeContext.getAcceptContentType());
     }
 
     @Override
-    protected RawJsonBody readInternal(Class<? extends RawJsonBody> clazz, HttpInputMessage inputMessage)
+    protected Object readInternal(Class<?> clazz, HttpInputMessage inputMessage)
             throws IOException, HttpMessageNotReadableException {
         byte[] bytes = inputMessage.getBody().readAllBytes();
         return new RawJsonBody(bytes);
     }
 
     @Override
-    protected void writeInternal(RawJsonBody rawJsonBody, HttpOutputMessage outputMessage)
+    protected void writeInternal(Object body, HttpOutputMessage outputMessage)
             throws IOException, HttpMessageNotWritableException {
-        // RawJsonBody stores bytes as a UTF-8 String via getJson().
-        // Convert back to bytes using the same charset to recover the original bytes.
-        byte[] bytes = rawJsonBody.getJson().getBytes(StandardCharsets.UTF_8);
-        outputMessage.getBody().write(bytes);
-        outputMessage.getBody().flush();
+        byte[] rawBytes = FlatBufferBytesHolder.getAndClear();
+        if (rawBytes != null) {
+            // Use the raw FlatBuffer bytes stored before RawJsonBody corruption
+            outputMessage.getBody().write(rawBytes);
+            outputMessage.getBody().flush();
+            return;
+        }
+        // Fallback: if body is RawJsonBody, use its JSON string bytes
+        if (body instanceof RawJsonBody rawJsonBody) {
+            byte[] bytes = rawJsonBody.getJson().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            outputMessage.getBody().write(bytes);
+            outputMessage.getBody().flush();
+        }
     }
 }
