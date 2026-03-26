@@ -425,6 +425,166 @@ class InterfaceRecordEmitter(
         }
     }
 
+    private fun generateFlatBufferSerializer(module: Module): Emitted {
+        val flatbuffersPackage = _packageName + "flatbuffers"
+        val modelPackage = _packageName + "model"
+        val recordPackage = _packageName + "record"
+        val arrayTypes = findArrayResponseTypes(module)
+
+        val content = buildString {
+            appendLine("package ${flatbuffersPackage.value};")
+            appendLine()
+            appendLine("import java.nio.ByteBuffer;")
+            appendLine("import java.util.ArrayList;")
+            appendLine("import java.util.List;")
+            appendLine("import com.google.flatbuffers.FlatBufferBuilder;")
+
+            // Import all model types and records
+            for ((typeName, _) in typeMappings) {
+                appendLine("import ${modelPackage.value}.$typeName;")
+                appendLine("import ${recordPackage.value}.${typeName}Record;")
+            }
+
+            appendLine()
+            appendLine("public final class FlatBufferSerializer {")
+            appendLine()
+            appendLine("  private FlatBufferSerializer() {}")
+            appendLine()
+
+            // Generate serialize/deserialize methods per type
+            for ((typeName, _) in typeMappings) {
+                val fields = typeFields[typeName] ?: continue
+                val fbClass = "${typeName}FlatBuffer"
+                val recordClass = "${typeName}Record"
+
+                // serialize method
+                appendLine("  public static byte[] serialize$typeName($typeName obj) {")
+                appendLine("    FlatBufferBuilder builder = new FlatBufferBuilder(256);")
+
+                // Pre-create string offsets
+                val stringFields = fields.filter { field ->
+                    val ref = field.reference
+                    ref is Reference.Primitive && (ref.type::class.simpleName ?: "") == "String"
+                }
+                for (field in stringFields) {
+                    val fieldName = field.identifier.value
+                    appendLine("    int ${fieldName}Offset = builder.createString(obj.$fieldName() != null ? obj.$fieldName() : \"\");")
+                }
+
+                // Build create call params
+                val createArgs = fields.map { field ->
+                    val fieldName = field.identifier.value
+                    val ref = field.reference
+                    if (ref is Reference.Primitive) {
+                        val primType = ref.type::class.simpleName ?: ""
+                        when (primType) {
+                            "String" -> "${fieldName}Offset"
+                            "Integer" -> "obj.$fieldName()"
+                            "Boolean" -> "obj.$fieldName()"
+                            "Number" -> "obj.$fieldName()"
+                            else -> "obj.$fieldName()"
+                        }
+                    } else {
+                        "obj.$fieldName()"
+                    }
+                }.joinToString(", ")
+
+                appendLine("    int offset = $fbClass.create$fbClass(builder, $createArgs);")
+                appendLine("    builder.finish(offset);")
+                appendLine("    ByteBuffer buf = builder.dataBuffer();")
+                appendLine("    byte[] result = new byte[buf.remaining()];")
+                appendLine("    buf.get(result);")
+                appendLine("    return result;")
+                appendLine("  }")
+                appendLine()
+
+                // deserialize method
+                appendLine("  public static $typeName deserialize$typeName(byte[] bytes) {")
+                appendLine("    ByteBuffer buf = ByteBuffer.wrap(bytes);")
+                appendLine("    $fbClass fb = $fbClass.getRootAs$fbClass(buf);")
+
+                val recordArgs = fields.joinToString(", ") { field ->
+                    val fieldName = field.identifier.value
+                    "fb.$fieldName()"
+                }
+
+                appendLine("    return new $recordClass($recordArgs);")
+                appendLine("  }")
+                appendLine()
+
+                // List serialize/deserialize only for array types
+                if (typeName in arrayTypes) {
+                    val listFbClass = "${typeName}ListFlatBuffer"
+
+                    // serializeList
+                    appendLine("  public static byte[] serialize${typeName}List(List<$typeName> list) {")
+                    appendLine("    FlatBufferBuilder builder = new FlatBufferBuilder(256);")
+                    appendLine("    int[] offsets = new int[list.size()];")
+                    appendLine("    for (int i = 0; i < list.size(); i++) {")
+                    appendLine("      $typeName item = list.get(i);")
+
+                    // Pre-create string offsets for each item
+                    for (field in stringFields) {
+                        val fieldName = field.identifier.value
+                        appendLine("      int ${fieldName}Offset = builder.createString(item.$fieldName() != null ? item.$fieldName() : \"\");")
+                    }
+
+                    val itemCreateArgs = fields.map { field ->
+                        val fieldName = field.identifier.value
+                        val ref = field.reference
+                        if (ref is Reference.Primitive) {
+                            val primType = ref.type::class.simpleName ?: ""
+                            when (primType) {
+                                "String" -> "${fieldName}Offset"
+                                "Integer" -> "item.$fieldName()"
+                                "Boolean" -> "item.$fieldName()"
+                                "Number" -> "item.$fieldName()"
+                                else -> "item.$fieldName()"
+                            }
+                        } else {
+                            "item.$fieldName()"
+                        }
+                    }.joinToString(", ")
+
+                    appendLine("      offsets[i] = $fbClass.create$fbClass(builder, $itemCreateArgs);")
+                    appendLine("    }")
+                    appendLine("    int itemsVector = $listFbClass.createItemsVector(builder, offsets);")
+                    appendLine("    int root = $listFbClass.create$listFbClass(builder, itemsVector);")
+                    appendLine("    builder.finish(root);")
+                    appendLine("    ByteBuffer buf = builder.dataBuffer();")
+                    appendLine("    byte[] result = new byte[buf.remaining()];")
+                    appendLine("    buf.get(result);")
+                    appendLine("    return result;")
+                    appendLine("  }")
+                    appendLine()
+
+                    // deserializeList
+                    appendLine("  public static List<$typeName> deserialize${typeName}List(byte[] bytes) {")
+                    appendLine("    ByteBuffer buf = ByteBuffer.wrap(bytes);")
+                    appendLine("    $listFbClass listFb = $listFbClass.getRootAs$listFbClass(buf);")
+                    appendLine("    List<$typeName> result = new ArrayList<>();")
+                    appendLine("    for (int i = 0; i < listFb.itemsLength(); i++) {")
+                    appendLine("      $fbClass fb = listFb.items(i);")
+
+                    val listRecordArgs = fields.joinToString(", ") { field ->
+                        val fieldName = field.identifier.value
+                        "fb.$fieldName()"
+                    }
+
+                    appendLine("      result.add(new $recordClass($listRecordArgs));")
+                    appendLine("    }")
+                    appendLine("    return result;")
+                    appendLine("  }")
+                    appendLine()
+                }
+            }
+
+            append("}")
+        }
+
+        return Emitted("${flatbuffersPackage.toDir()}FlatBufferSerializer", content)
+    }
+
     override fun emit(module: Module, logger: Logger): NonEmptyList<Emitted> {
         extraEmitted.clear()
         typeMappings.clear()
@@ -478,6 +638,9 @@ class InterfaceRecordEmitter(
                 Emitted("${flatbuffersPackage.toDir()}${typeName}ListFlatBuffer", listFbContent)
             )
         }
+
+        // Generate FlatBufferSerializer
+        extraEmitted.add(generateFlatBufferSerializer(module))
 
         val allExtra = extraEmitted.toList()
         extraEmitted.clear()
