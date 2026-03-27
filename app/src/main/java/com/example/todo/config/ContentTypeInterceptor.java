@@ -26,6 +26,9 @@ public class ContentTypeInterceptor implements AsyncHandlerInterceptor {
         String accept = request.getHeader("Accept");
         if (accept != null) {
             ContentTypeContext.setAcceptContentType(accept);
+            if ("application/flatbuffers".equals(accept)) {
+                response.setContentType("application/flatbuffers");
+            }
         }
 
         return true;
